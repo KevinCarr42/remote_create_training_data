@@ -102,7 +102,7 @@ def extract_both_languages_from_single_file(json_file, clf):
     return " ".join(text_fr), " ".join(text_en)
 
 
-def create_sentences(text_fr, text_en):
+def create_sentences(text_fr, text_en):  # TODO: if we forget about \n\n, maybe this would exclude a bunch of appendix junk
     sentences_fr = [x.strip() for x in re.split(r'(?<![;,])[.?!]\s|\n\n', text_fr) if x != ""]
     sentences_en = [x.strip() for x in re.split(r'(?<![;,])[.?!]\s|\n\n', text_en) if x != ""]
 
@@ -110,9 +110,21 @@ def create_sentences(text_fr, text_en):
 
 
 def create_similarity_matrix(sentences_fr, sentences_en, sentence_encoder, device):
-    batch_size = 256  # 512: 25 GB VRAM (10 min, single gpu), just left 256 to be safe over weekend
-    embeddings_fr = sentence_encoder.encode(sentences_fr, convert_to_tensor=True, batch_size=batch_size, device=device)
-    embeddings_en = sentence_encoder.encode(sentences_en, convert_to_tensor=True, batch_size=batch_size, device=device)
+    max_batch_size = 1024
+    min_batch_size = 8
+
+    embeddings_fr = sentence_encoder.encode(
+        sentences_fr,
+        convert_to_tensor=True,
+        batch_size=min(max_batch_size, max(min_batch_size, len(sentences_fr))),
+        device=device
+    )
+    embeddings_en = sentence_encoder.encode(
+        sentences_en,
+        convert_to_tensor=True,
+        batch_size=min(max_batch_size, max(min_batch_size, len(sentences_en))),
+        device=device
+    )
 
     return util.pytorch_cos_sim(embeddings_fr, embeddings_en)
 
@@ -142,7 +154,7 @@ def align_sentences(sim_matrix, device):
             j -= 1
         else:
             similarity_score = sim_matrix[i - 1, j - 1].item()
-            if similarity_score >= threshold:
+            if weights[i - 1, j - 1] > 0:
                 aligned_pairs.append((i - 1, j - 1, similarity_score))
             i -= 1
             j -= 1
@@ -215,8 +227,7 @@ def print_time_estimate(start_time, n, n_total):
         print(f"\n{n}/{n_total} complete.", end="... ")
         return
 
-    current_time = time.time()
-    time_elapsed = int(current_time - start_time)
+    time_elapsed = int(time.time() - start_time)
     time_remaining = int((n_total / n) * time_elapsed)
 
     time_elapsed_text = f"{time_elapsed // 3600}h:{(time_elapsed % 3600) // 60:02d}m"
@@ -241,7 +252,7 @@ def main():
     rows = list(fr_eng_correlation_df.iterrows())
     n_rows = len(rows)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    num_workers = mp.cpu_count()
+    num_workers = max(1, os.cpu_count() - 2)
 
     language_classifier = LanguageClassifier()
     sentence_encoder = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2').to(device)
@@ -275,7 +286,7 @@ def main():
             if result:
                 results_wo.extend(result)
 
-            print_status(start_time, i, n_rows)
+            print_status(start_time, i, n_rows * 2)
 
     matched_df_wo_abstracts = pd.DataFrame(results_wo, columns=['pub_number', 'fr', 'en', 'similarity'])
     matched_df_wo_abstracts.to_pickle("matched_data_wo_abstracts.pickle")
