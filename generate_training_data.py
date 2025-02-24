@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 import torch
 
 import multiprocessing as mp
@@ -116,7 +117,8 @@ def create_similarity_matrix(sentences_fr, sentences_en, sentence_encoder, devic
     return util.pytorch_cos_sim(embeddings_fr, embeddings_en)
 
 
-def align_sentences(sim_matrix, device, threshold=0.7):
+def align_sentences(sim_matrix, device):
+    threshold = 0.7
     n, m = sim_matrix.shape
 
     weights = torch.where(sim_matrix >= threshold, sim_matrix, torch.tensor(0.0, device=device))
@@ -139,8 +141,9 @@ def align_sentences(sim_matrix, device, threshold=0.7):
         elif torch.isclose(current_val, dp[i, j - 1]):
             j -= 1
         else:
-            if weights[i - 1, j - 1] > 0:
-                aligned_pairs.append((i - 1, j - 1))
+            similarity_score = sim_matrix[i - 1, j - 1].item()
+            if similarity_score >= threshold:
+                aligned_pairs.append((i - 1, j - 1, similarity_score))
             i -= 1
             j -= 1
 
@@ -151,8 +154,8 @@ def align_sentences(sim_matrix, device, threshold=0.7):
 
 def text_from_coordinates(aligned_pairs, sentences_fr, sentences_en, pub_number):
     correlated_list = list()
-    for i, j in aligned_pairs:
-        correlated_list.append((pub_number, sentences_fr[i], sentences_en[j]))
+    for i, j, similarity in aligned_pairs:
+        correlated_list.append((pub_number, sentences_fr[i], sentences_en[j], round(similarity, 3)))
 
     return correlated_list
 
@@ -190,6 +193,7 @@ def process_row(row_tuple, device, language_classifier, sentence_encoder, skip_a
     max_ratio = 2  # abstract only translations to (potentially) exclude
     min_char = 1000  # low quality, bad OCR, or incomplete transcription / parsing
     len_fr, len_en = len(text_fr), len(text_en)
+
     if len_fr == 0 or len_en == 0:
         return None
     elif skip_abstract_only_translations:
@@ -206,16 +210,32 @@ def process_row_wrapper(args):
     return process_row(row, device, language_classifier, sentence_encoder, skip_abstracts)
 
 
-def print_status(n, n_total):
-    end = "... "
+def print_time_estimate(start_time, n, n_total):
+    if n == 0:
+        print(f"\n{n}/{n_total} complete.", end="... ")
+        return
+
+    current_time = time.time()
+    time_elapsed = int(current_time - start_time)
+    time_remaining = int((n_total / n) * time_elapsed)
+
+    time_elapsed_text = f"{time_elapsed // 3600}h:{(time_elapsed % 3600) // 60:02d}m"
+    time_remaining_text = f"{time_remaining // 3600}h:{(time_remaining % 3600) // 60:02d}m"
+
+    print(f"\n{n}/{n_total} complete at {time_elapsed_text}. Estimated {time_remaining_text} remaining.", end="... ")
+
+
+def print_status(start_time, n, n_total):
     if n % 10 == 0:
         if n % 100 == 0:
-            print(f"\nProcessed {n}/{n_total} rows", end=end)
+            print_time_estimate(start_time, n, n_total)
         else:
-            print(f"{n}", end=end)
+            print(f"{n}", end="... ")
 
 
 def main():
+    start_time = time.time()
+
     fr_eng_correlation_df = pd.read_csv("fr_eng_correlation_data.csv")
     fr_eng_correlation_df = fr_eng_correlation_df[['pub_number', 'filename_fr', 'filename_en']]
     rows = list(fr_eng_correlation_df.iterrows())
@@ -228,7 +248,7 @@ def main():
 
     print(f'\nUsing device: {device}')
     print(f"Using {num_workers} CPU cores.\n")
-
+    
     args_list = [(row, device, language_classifier, sentence_encoder, False) for row in rows]
 
     print("=========== PROCESSING matched_df ===========")
@@ -236,14 +256,14 @@ def main():
     with mp.Pool(num_workers) as pool:
         results = []
         for i, result in enumerate(pool.imap_unordered(process_row_wrapper, args_list)):
-            if result is not None:
+            if result:
                 results.extend(result)
 
-            print_status(i, n_rows)
+            print_status(start_time, i, n_rows * 2)
 
-    matched_df = pd.DataFrame(results, columns=['pub_number', 'fr', 'en'])
+    matched_df = pd.DataFrame(results, columns=['pub_number', 'fr', 'en', 'similarity'])
     matched_df.to_pickle("matched_data.pickle")
-    print(f"Processing matched_df complete!\n")
+    print(f"\nProcessing matched_df complete!\n")
 
     args_list_wo = [(row, device, language_classifier, sentence_encoder, True) for row in rows]
 
@@ -252,14 +272,14 @@ def main():
     with mp.Pool(num_workers) as pool:
         results_wo = []
         for i, result in enumerate(pool.imap_unordered(process_row_wrapper, args_list_wo)):
-            if result is not None:
+            if result:
                 results_wo.extend(result)
 
-            print_status(i, n_rows)
+            print_status(start_time, i, n_rows)
 
-    matched_df_wo_abstracts = pd.DataFrame(results_wo, columns=['pub_number', 'fr', 'en'])
+    matched_df_wo_abstracts = pd.DataFrame(results_wo, columns=['pub_number', 'fr', 'en', 'similarity'])
     matched_df_wo_abstracts.to_pickle("matched_data_wo_abstracts.pickle")
-    print(f"Processing matched_df_wo_abstracts complete!\n")
+    print(f"\nProcessing matched_df_wo_abstracts complete!\n")
 
 
 if __name__ == '__main__':
