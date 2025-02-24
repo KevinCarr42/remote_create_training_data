@@ -6,7 +6,6 @@ import torch
 import multiprocessing as mp
 import pandas as pd
 
-from alive_progress import alive_bar
 from sentence_transformers import SentenceTransformer, util
 from torch.utils.data import DataLoader
 
@@ -110,7 +109,7 @@ def create_sentences(text_fr, text_en):
 
 
 def create_similarity_matrix(sentences_fr, sentences_en, sentence_encoder, device):
-    batch_size = 512  # 512: 25 GB VRAM (10 min, single gpu),
+    batch_size = 256  # 512: 25 GB VRAM (10 min, single gpu), just left 256 to be safe over weekend
     embeddings_fr = sentence_encoder.encode(sentences_fr, convert_to_tensor=True, batch_size=batch_size, device=device)
     embeddings_en = sentence_encoder.encode(sentences_en, convert_to_tensor=True, batch_size=batch_size, device=device)
 
@@ -207,61 +206,62 @@ def process_row_wrapper(args):
     return process_row(row, device, language_classifier, sentence_encoder, skip_abstracts)
 
 
+def print_status(n, n_total):
+    end = "... "
+    if n % 10 == 0:
+        if n % 100 == 0:
+            print(f"\nProcessed {n}/{n_total} rows", end=end)
+        else:
+            print(f"{n}", end=end)
+
+
 def main():
     fr_eng_correlation_df = pd.read_csv("fr_eng_correlation_data.csv")
     fr_eng_correlation_df = fr_eng_correlation_df[['pub_number', 'filename_fr', 'filename_en']]
     rows = list(fr_eng_correlation_df.iterrows())
-
+    n_rows = len(rows)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f'\nUsing device: {device}\n')
+    num_workers = mp.cpu_count()
 
     language_classifier = LanguageClassifier()
-
     sentence_encoder = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2').to(device)
-    if torch.cuda.device_count() > 1:
-        print(f"\nUsing {torch.cuda.device_count()} GPUs\n")
 
-    num_workers = mp.cpu_count()
-    print(f"\nUsing {num_workers} CPU cores.\n")
-
-    print("""
-    ================================================
-    PROCESSING matched_df
-    ================================================
-    """)
+    print(f'\nUsing device: {device}')
+    print(f"Using {num_workers} CPU cores.\n")
 
     args_list = [(row, device, language_classifier, sentence_encoder, False) for row in rows]
 
-    with alive_bar(len(rows), force_tty=True) as bar, mp.Pool(num_workers) as pool:
+    print("=========== PROCESSING matched_df ===========")
+
+    with mp.Pool(num_workers) as pool:
         results = []
-        for result in pool.imap_unordered(process_row_wrapper, args_list):
+        for i, result in enumerate(pool.imap_unordered(process_row_wrapper, args_list)):
             if result is not None:
-                results.append(result)
-            bar()
+                results.extend(result)
+
+            print_status(i, n_rows)
 
     matched_df = pd.DataFrame(results, columns=['pub_number', 'fr', 'en'])
     matched_df.to_pickle("matched_data.pickle")
-
-    print("""
-    ================================================
-    PROCESSING matched_df_wo_abstracts
-    ================================================
-    """)
+    print(f"Processing matched_df complete!\n")
 
     args_list_wo = [(row, device, language_classifier, sentence_encoder, True) for row in rows]
 
-    with alive_bar(len(rows), force_tty=True) as bar, mp.Pool(num_workers) as pool:
+    print("=========== PROCESSING matched_df_wo_abstracts ===========")
+
+    with mp.Pool(num_workers) as pool:
         results_wo = []
-        for result in pool.imap_unordered(process_row_wrapper, args_list_wo):
+        for i, result in enumerate(pool.imap_unordered(process_row_wrapper, args_list_wo)):
             if result is not None:
-                results_wo.append(result)
-            bar()
+                results_wo.extend(result)
+
+            print_status(i, n_rows)
 
     matched_df_wo_abstracts = pd.DataFrame(results_wo, columns=['pub_number', 'fr', 'en'])
     matched_df_wo_abstracts.to_pickle("matched_data_wo_abstracts.pickle")
+    print(f"Processing matched_df_wo_abstracts complete!\n")
 
 
 if __name__ == '__main__':
     mp.set_start_method('spawn')
     main()
-
