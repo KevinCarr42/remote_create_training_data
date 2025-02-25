@@ -134,69 +134,38 @@ def create_similarity_matrix(sentences_fr, sentences_en, sentence_encoder, devic
     return util.pytorch_cos_sim(embeddings_fr, embeddings_en)
 
 
-def align_sentences(sim_matrix, device, use_numpy=True):
+def align_sentences(sim_matrix, device):
     threshold = 0.7
     n, m = sim_matrix.shape
 
-    if use_numpy:  # TODO: WAY FASTER with numpy, ETA ~3hr for 4 scenarios
-        sim_matrix = sim_matrix.cpu().numpy()
-        weights = np.where(sim_matrix >= threshold, sim_matrix, 0.0)
-        dp = np.zeros((n + 1, m + 1), dtype=np.float32)
+    sim_matrix = sim_matrix.cpu().numpy()
+    weights = np.where(sim_matrix >= threshold, sim_matrix, 0.0)
+    dp = np.zeros((n + 1, m + 1), dtype=np.float32)
 
-        for i in range(1, n + 1):
-            for j in range(1, m + 1):
-                score_match = dp[i - 1, j - 1] + weights[i - 1, j - 1]
-                score_skip_fr = dp[i - 1, j]
-                score_skip_en = dp[i, j - 1]
-                dp[i, j] = np.max([score_match, score_skip_fr, score_skip_en])
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            score_match = dp[i - 1, j - 1] + weights[i - 1, j - 1]
+            score_skip_fr = dp[i - 1, j]
+            score_skip_en = dp[i, j - 1]
+            dp[i, j] = np.max([score_match, score_skip_fr, score_skip_en])
 
-        aligned_pairs = []
-        i, j = n, m
-        while i > 0 and j > 0:
-            current_val = dp[i, j]
-            if np.isclose(current_val, dp[i - 1, j]):
-                i -= 1
-            elif np.isclose(current_val, dp[i, j - 1]):
-                j -= 1
-            else:
-                similarity_score = sim_matrix[i - 1, j - 1]
-                if weights[i - 1, j - 1] > 0.0:
-                    aligned_pairs.append((i - 1, j - 1, float(similarity_score)))
-                i -= 1
-                j -= 1
+    aligned_pairs = []
+    i, j = n, m
+    while i > 0 and j > 0:
+        current_val = dp[i, j]
+        if np.isclose(current_val, dp[i - 1, j]):
+            i -= 1
+        elif np.isclose(current_val, dp[i, j - 1]):
+            j -= 1
+        else:
+            similarity_score = sim_matrix[i - 1, j - 1]
+            if weights[i - 1, j - 1] > 0.0:
+                aligned_pairs.append((i - 1, j - 1, float(similarity_score)))
+            i -= 1
+            j -= 1
 
-        aligned_pairs.reverse()
-        return aligned_pairs
-
-    else:  # TODO: confirm this is fastest 100 ETA: 12:10, 30:24 after tweaks (2x scenarios)
-        weights = torch.where(sim_matrix >= threshold, sim_matrix, torch.tensor(0.0, device=device))
-        dp = torch.zeros((n + 1, m + 1), dtype=torch.float32, device=device)
-
-        for i in range(1, n + 1):
-            for j in range(1, m + 1):
-                score_match = dp[i - 1, j - 1] + weights[i - 1, j - 1]
-                score_skip_fr = dp[i - 1, j]
-                score_skip_en = dp[i, j - 1]
-
-                dp[i, j] = torch.max(torch.tensor([score_match, score_skip_fr, score_skip_en], device=device))
-
-        aligned_pairs = []
-        i, j = n, m
-        while i > 0 and j > 0:
-            current_val = dp[i, j]
-            if torch.isclose(current_val, dp[i - 1, j]):
-                i -= 1
-            elif torch.isclose(current_val, dp[i, j - 1]):
-                j -= 1
-            else:
-                similarity_score = sim_matrix[i - 1, j - 1].item()
-                if weights[i - 1, j - 1] > 0:
-                    aligned_pairs.append((i - 1, j - 1, similarity_score))
-                i -= 1
-                j -= 1
-
-        aligned_pairs.reverse()
-        return aligned_pairs
+    aligned_pairs.reverse()
+    return aligned_pairs
 
 
 def text_from_coordinates(aligned_pairs, sentences_fr, sentences_en, pub_number):
@@ -272,8 +241,11 @@ def print_time_estimate(start_time, n, n_total):
 
 
 def print_status(start_time, n, n_total):
-    if n % 10 == 0:
-        if n % 100 == 0:
+    small_update = 25
+    large_update = 500
+
+    if n % small_update == 0:
+        if n % large_update == 0:
             print_time_estimate(start_time, n, n_total)
         else:
             print(f"{n}", end="... ")
