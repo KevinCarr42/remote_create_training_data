@@ -6,6 +6,7 @@ import torch
 
 import multiprocessing as mp
 import pandas as pd
+import numpy as np
 
 from sentence_transformers import SentenceTransformer, util
 from torch.utils.data import DataLoader
@@ -94,74 +95,108 @@ def extract_both_languages_from_single_file(json_file, clf):
         if len(block) < min_block_length or len(block) > max_block_length:
             continue
 
-        if clf.classify(block) == "fr":
+        lang = clf.classify(block)
+        if lang == "fr":
             text_fr.append(block + '. ')
-        elif clf.classify(block) == "en":
+        elif lang == "en":
             text_en.append(block + '. ')
 
     return " ".join(text_fr), " ".join(text_en)
 
 
-def create_sentences(text_fr, text_en):  # TODO: if we forget about \n\n, maybe this would exclude a bunch of appendix junk
-    sentences_fr = [x.strip() for x in re.split(r'(?<![;,])[.?!]\s|\n\n', text_fr) if x != ""]
-    sentences_en = [x.strip() for x in re.split(r'(?<![;,])[.?!]\s|\n\n', text_en) if x != ""]
+def create_sentences(text_fr, text_en, linebreaks=True):
+    if linebreaks:
+        sentences_fr = [x.strip() for x in re.split(r'(?<![;,])[.?!]\s|\n\n', text_fr) if x != ""]
+        sentences_en = [x.strip() for x in re.split(r'(?<![;,])[.?!]\s|\n\n', text_en) if x != ""]
+    else:
+        sentences_fr = [x.strip() for x in re.split(r'(?<![;,])[.?!]\s', text_fr) if x != ""]
+        sentences_en = [x.strip() for x in re.split(r'(?<![;,])[.?!]\s', text_en) if x != ""]
 
     return sentences_fr, sentences_en
 
 
 def create_similarity_matrix(sentences_fr, sentences_en, sentence_encoder, device):
-    max_batch_size = 1024
-    min_batch_size = 8
+    max_batch_size = 512  # 1024 gives out of memory error
 
     embeddings_fr = sentence_encoder.encode(
         sentences_fr,
         convert_to_tensor=True,
-        batch_size=min(max_batch_size, max(min_batch_size, len(sentences_fr))),
+        batch_size=min(max_batch_size, len(sentences_fr)),
         device=device
     )
     embeddings_en = sentence_encoder.encode(
         sentences_en,
         convert_to_tensor=True,
-        batch_size=min(max_batch_size, max(min_batch_size, len(sentences_en))),
+        batch_size=min(max_batch_size, len(sentences_fr)),
         device=device
     )
 
     return util.pytorch_cos_sim(embeddings_fr, embeddings_en)
 
 
-def align_sentences(sim_matrix, device):
+def align_sentences(sim_matrix, device, use_numpy=True):
     threshold = 0.7
     n, m = sim_matrix.shape
 
-    weights = torch.where(sim_matrix >= threshold, sim_matrix, torch.tensor(0.0, device=device))
-    dp = torch.zeros((n + 1, m + 1), dtype=torch.float32, device=device)
+    if use_numpy:  # TODO: WAY FASTER with numpy, ETA ~3hr for 4 scenarios
+        sim_matrix = sim_matrix.cpu().numpy()
+        weights = np.where(sim_matrix >= threshold, sim_matrix, 0.0)
+        dp = np.zeros((n + 1, m + 1), dtype=np.float32)
 
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            score_match = dp[i - 1, j - 1] + weights[i - 1, j - 1]
-            score_skip_fr = dp[i - 1, j]
-            score_skip_en = dp[i, j - 1]
+        for i in range(1, n + 1):
+            for j in range(1, m + 1):
+                score_match = dp[i - 1, j - 1] + weights[i - 1, j - 1]
+                score_skip_fr = dp[i - 1, j]
+                score_skip_en = dp[i, j - 1]
+                dp[i, j] = np.max([score_match, score_skip_fr, score_skip_en])
 
-            dp[i, j] = torch.max(torch.tensor([score_match, score_skip_fr, score_skip_en], device=device))
+        aligned_pairs = []
+        i, j = n, m
+        while i > 0 and j > 0:
+            current_val = dp[i, j]
+            if np.isclose(current_val, dp[i - 1, j]):
+                i -= 1
+            elif np.isclose(current_val, dp[i, j - 1]):
+                j -= 1
+            else:
+                similarity_score = sim_matrix[i - 1, j - 1]
+                if weights[i - 1, j - 1] > 0.0:
+                    aligned_pairs.append((i - 1, j - 1, float(similarity_score)))
+                i -= 1
+                j -= 1
 
-    aligned_pairs = []
-    i, j = n, m
-    while i > 0 and j > 0:
-        current_val = dp[i, j]
-        if torch.isclose(current_val, dp[i - 1, j]):
-            i -= 1
-        elif torch.isclose(current_val, dp[i, j - 1]):
-            j -= 1
-        else:
-            similarity_score = sim_matrix[i - 1, j - 1].item()
-            if weights[i - 1, j - 1] > 0:
-                aligned_pairs.append((i - 1, j - 1, similarity_score))
-            i -= 1
-            j -= 1
+        aligned_pairs.reverse()
+        return aligned_pairs
 
-    aligned_pairs.reverse()
+    else:  # TODO: confirm this is fastest 100 ETA: 12:10, 30:24 after tweaks (2x scenarios)
+        weights = torch.where(sim_matrix >= threshold, sim_matrix, torch.tensor(0.0, device=device))
+        dp = torch.zeros((n + 1, m + 1), dtype=torch.float32, device=device)
 
-    return aligned_pairs
+        for i in range(1, n + 1):
+            for j in range(1, m + 1):
+                score_match = dp[i - 1, j - 1] + weights[i - 1, j - 1]
+                score_skip_fr = dp[i - 1, j]
+                score_skip_en = dp[i, j - 1]
+
+                dp[i, j] = torch.max(torch.tensor([score_match, score_skip_fr, score_skip_en], device=device))
+
+        aligned_pairs = []
+        i, j = n, m
+        while i > 0 and j > 0:
+            current_val = dp[i, j]
+            if torch.isclose(current_val, dp[i - 1, j]):
+                i -= 1
+            elif torch.isclose(current_val, dp[i, j - 1]):
+                j -= 1
+            else:
+                similarity_score = sim_matrix[i - 1, j - 1].item()
+                if weights[i - 1, j - 1] > 0:
+                    aligned_pairs.append((i - 1, j - 1, similarity_score))
+                i -= 1
+                j -= 1
+
+        aligned_pairs.reverse()
+        return aligned_pairs
 
 
 def text_from_coordinates(aligned_pairs, sentences_fr, sentences_en, pub_number):
@@ -172,15 +207,15 @@ def text_from_coordinates(aligned_pairs, sentences_fr, sentences_en, pub_number)
     return correlated_list
 
 
-def correlate_and_clean_text(text_fr, text_en, pub_number, sentence_encoder, device):
-    sentences_fr, sentences_en = create_sentences(text_fr, text_en)
+def correlate_and_clean_text(text_fr, text_en, pub_number, sentence_encoder, device, linebreaks=True):
+    sentences_fr, sentences_en = create_sentences(text_fr, text_en, linebreaks)
     similarity_matrix = create_similarity_matrix(sentences_fr, sentences_en, sentence_encoder, device)
     aligned_pairs = align_sentences(similarity_matrix, device)
 
     return text_from_coordinates(aligned_pairs, sentences_fr, sentences_en, pub_number)
 
 
-def process_row(row_tuple, device, language_classifier, sentence_encoder, skip_abstract_only_translations=False):
+def process_row(row_tuple, device, language_classifier, sentence_encoder, skip_abstract_only_translations=False, linebreaks=True):
     parsed_docs_folder = os.path.join("..", "ParsedPublications")
     index, row = row_tuple
     pub_number = row['pub_number']
@@ -214,12 +249,12 @@ def process_row(row_tuple, device, language_classifier, sentence_encoder, skip_a
     elif len(text_fr) < min_char or len(text_en) < min_char:
         return None
 
-    return correlate_and_clean_text(text_fr, text_en, pub_number, sentence_encoder, device)
+    return correlate_and_clean_text(text_fr, text_en, pub_number, sentence_encoder, device, linebreaks)
 
 
 def process_row_wrapper(args):
-    row, device, language_classifier, sentence_encoder, skip_abstracts = args
-    return process_row(row, device, language_classifier, sentence_encoder, skip_abstracts)
+    row, device, language_classifier, sentence_encoder, skip_abstracts, linebreaks = args
+    return process_row(row, device, language_classifier, sentence_encoder, skip_abstracts, linebreaks)
 
 
 def print_time_estimate(start_time, n, n_total):
@@ -244,25 +279,12 @@ def print_status(start_time, n, n_total):
             print(f"{n}", end="... ")
 
 
-def main():
+def create_df(num_workers, n_rows, rows, device, language_classifier, sentence_encoder, skip_abstracts, linebreaks, filename):
     start_time = time.time()
 
-    fr_eng_correlation_df = pd.read_csv("fr_eng_correlation_data.csv")
-    fr_eng_correlation_df = fr_eng_correlation_df[['pub_number', 'filename_fr', 'filename_en']]
-    rows = list(fr_eng_correlation_df.iterrows())
-    n_rows = len(rows)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    num_workers = max(1, os.cpu_count() - 2)
+    args_list = [(row, device, language_classifier, sentence_encoder, skip_abstracts, linebreaks) for row in rows]
 
-    language_classifier = LanguageClassifier()
-    sentence_encoder = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2').to(device)
-
-    print(f'\nUsing device: {device}')
-    print(f"Using {num_workers} CPU cores.\n")
-    
-    args_list = [(row, device, language_classifier, sentence_encoder, False) for row in rows]
-
-    print("=========== PROCESSING matched_df ===========")
+    print(f"=========== PROCESSING {filename} ===========")
 
     with mp.Pool(num_workers) as pool:
         results = []
@@ -270,27 +292,35 @@ def main():
             if result:
                 results.extend(result)
 
-            print_status(start_time, i, n_rows * 2)
+            print_status(start_time, i, n_rows)
 
-    matched_df = pd.DataFrame(results, columns=['pub_number', 'fr', 'en', 'similarity'])
-    matched_df.to_pickle("matched_data.pickle")
-    print(f"\nProcessing matched_df complete!\n")
+    dataframe = pd.DataFrame(results, columns=['pub_number', 'fr', 'en', 'similarity'])
+    dataframe.to_pickle(filename)
+    print(f"\nProcessing {filename} complete!\n")
 
-    args_list_wo = [(row, device, language_classifier, sentence_encoder, True) for row in rows]
+    return dataframe
 
-    print("=========== PROCESSING matched_df_wo_abstracts ===========")
 
-    with mp.Pool(num_workers) as pool:
-        results_wo = []
-        for i, result in enumerate(pool.imap_unordered(process_row_wrapper, args_list_wo)):
-            if result:
-                results_wo.extend(result)
+def main():
 
-            print_status(start_time, i, n_rows * 2)
+    fr_eng_correlation_df = pd.read_csv("fr_eng_correlation_data.csv")
+    fr_eng_correlation_df = fr_eng_correlation_df[['pub_number', 'filename_fr', 'filename_en']]
+    rows = list(fr_eng_correlation_df.iterrows())
+    n_rows = len(rows)
+    # device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    num_workers = max(1, os.cpu_count() // 2)
 
-    matched_df_wo_abstracts = pd.DataFrame(results_wo, columns=['pub_number', 'fr', 'en', 'similarity'])
-    matched_df_wo_abstracts.to_pickle("matched_data_wo_abstracts.pickle")
-    print(f"\nProcessing matched_df_wo_abstracts complete!\n")
+    language_classifier = LanguageClassifier()
+    sentence_encoder = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2').to(device)
+
+    print(f'\nUsing device: {device}')
+    print(f"Using {num_workers} CPU cores.\n")
+
+    create_df(num_workers, n_rows, rows, device, language_classifier, sentence_encoder, False, True, "matched_data.pickle")
+    create_df(num_workers, n_rows, rows, device, language_classifier, sentence_encoder, True, True, "matched_df_wo_abstracts.pickle")
+    create_df(num_workers, n_rows, rows, device, language_classifier, sentence_encoder, False, False, "matched_df_wo_linebreaks.pickle")
+    create_df(num_workers, n_rows, rows, device, language_classifier, sentence_encoder, True, False, "matched_df_wo_abstracts_wo_linebreaks.pickle")
 
 
 if __name__ == '__main__':
