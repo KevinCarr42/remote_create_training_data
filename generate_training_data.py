@@ -46,7 +46,7 @@ def get_json_file_link(parsed_docs_folder, pdf_filename):
     return None
 
 
-def extract_text_from_single_file(json_file, target_language, clf, skip_cleaning=False):
+def extract_text_from_single_file(json_file, target_language, clf, skip_cleaning=False, linebreaks=True):
     min_block_length = 10
     max_block_length = 500
 
@@ -57,7 +57,10 @@ def extract_text_from_single_file(json_file, target_language, clf, skip_cleaning
         raise KeyError(f"The key 'text' is missing in the JSON file: {json_file}")
 
     full_text = clean_text(data['text'], skip_cleaning)
-    text_blocks = re.split(r'(?<![;,])[.?!]\s|\n\n', full_text)
+    if linebreaks:
+        text_blocks = re.split(r'(?<![;,])[.?!]\s|\n\n', full_text)
+    else:
+        text_blocks = re.split(r'(?<![;,])[.?!]\s', full_text)
     text = []
 
     for block in text_blocks:
@@ -71,12 +74,12 @@ def extract_text_from_single_file(json_file, target_language, clf, skip_cleaning
     return " ".join(text)
 
 
-def extract_both_languages_from_two_files(json_file_fr, json_file_en, clf):
-    return (extract_text_from_single_file(json_file_fr, "fr", clf),
-            extract_text_from_single_file(json_file_en, "en", clf))
+def extract_both_languages_from_two_files(json_file_fr, json_file_en, clf, linebreaks=True):
+    return (extract_text_from_single_file(json_file_fr, "fr", clf, linebreaks),
+            extract_text_from_single_file(json_file_en, "en", clf, linebreaks))
 
 
-def extract_both_languages_from_single_file(json_file, clf):
+def extract_both_languages_from_single_file(json_file, clf, linebreaks=True):
     min_block_length = 10
     max_block_length = 500
 
@@ -87,7 +90,11 @@ def extract_both_languages_from_single_file(json_file, clf):
         raise KeyError(f"The key 'text' is missing in the JSON file: {json_file}")
 
     full_text = clean_text(data['text'], skip_cleaning=False)
-    text_blocks = re.split(r'(?<![;,])[.?!]\s|\n\n', full_text)
+    if linebreaks:
+        text_blocks = re.split(r'(?<![;,])[.?!]\s|\n\n', full_text)
+    else:
+        text_blocks = re.split(r'(?<![;,])[.?!]\s', full_text)
+
     text_fr, text_en = [], []
 
     for block in text_blocks:
@@ -184,7 +191,8 @@ def correlate_and_clean_text(text_fr, text_en, pub_number, sentence_encoder, dev
     return text_from_coordinates(aligned_pairs, sentences_fr, sentences_en, pub_number)
 
 
-def process_row(row_tuple, device, language_classifier, sentence_encoder, skip_abstract_only_translations=False, linebreaks=True):
+def process_row(row_tuple, device, language_classifier, sentence_encoder, skip_abstract_only_translations=False,
+                linebreaks=True):
     parsed_docs_folder = os.path.join("..", "ParsedPublications")
     index, row = row_tuple
     pub_number = row['pub_number']
@@ -198,12 +206,12 @@ def process_row(row_tuple, device, language_classifier, sentence_encoder, skip_a
         return None
 
     if filename_fr == filename_en:
-        text_fr, text_en = extract_both_languages_from_single_file(fr_link, language_classifier)
+        text_fr, text_en = extract_both_languages_from_single_file(fr_link, language_classifier, linebreaks)
     else:
         en_link = get_json_file_link(parsed_docs_folder, filename_en)
         if en_link is None:
             return None
-        text_fr, text_en = extract_both_languages_from_two_files(fr_link, en_link, language_classifier)
+        text_fr, text_en = extract_both_languages_from_two_files(fr_link, en_link, language_classifier, linebreaks)
 
     # low-quality text criteria
     max_ratio = 2  # abstract only translations to (potentially) exclude
@@ -232,7 +240,7 @@ def print_time_estimate(start_time, n, n_total):
         return
 
     time_elapsed = int(time.time() - start_time)
-    time_remaining = int((n_total / n) * time_elapsed)
+    time_remaining = int((time_elapsed / n) * (n_total - n))
 
     time_elapsed_text = f"{time_elapsed // 3600}h:{(time_elapsed % 3600) // 60:02d}m"
     time_remaining_text = f"{time_remaining // 3600}h:{(time_remaining % 3600) // 60:02d}m"
@@ -241,7 +249,7 @@ def print_time_estimate(start_time, n, n_total):
 
 
 def print_status(start_time, n, n_total):
-    small_update = 25
+    small_update = 50
     large_update = 500
 
     if n % small_update == 0:
@@ -274,12 +282,10 @@ def create_df(num_workers, n_rows, rows, device, language_classifier, sentence_e
 
 
 def main():
-
     fr_eng_correlation_df = pd.read_csv("fr_eng_correlation_data.csv")
     fr_eng_correlation_df = fr_eng_correlation_df[['pub_number', 'filename_fr', 'filename_en']]
     rows = list(fr_eng_correlation_df.iterrows())
     n_rows = len(rows)
-    # device = "cpu"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     num_workers = max(1, os.cpu_count() // 2)
 
