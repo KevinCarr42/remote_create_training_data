@@ -290,9 +290,9 @@ def main():
     print(f"Using {num_workers} CPU cores.\n")
 
     create_df(num_workers, n_rows, rows, device, language_classifier, sentence_encoder, False, True, "matched_data.pickle")
-    create_df(num_workers, n_rows, rows, device, language_classifier, sentence_encoder, True, True, "matched_df_wo_abstracts.pickle")
-    create_df(num_workers, n_rows, rows, device, language_classifier, sentence_encoder, False, False, "matched_df_wo_linebreaks.pickle")
-    create_df(num_workers, n_rows, rows, device, language_classifier, sentence_encoder, True, False, "matched_df_wo_abstracts_wo_linebreaks.pickle")
+    create_df(num_workers, n_rows, rows, device, language_classifier, sentence_encoder, True, True, "matched_data_wo_abstracts.pickle")
+    create_df(num_workers, n_rows, rows, device, language_classifier, sentence_encoder, False, False, "matched_data_wo_linebreaks.pickle")
+    create_df(num_workers, n_rows, rows, device, language_classifier, sentence_encoder, True, False, "matched_data_wo_abstracts_wo_linebreaks.pickle")
 
 
 if __name__ == '__main__':
